@@ -213,19 +213,27 @@ type blockUnpacker struct {
 	buf internal.LazyBuffer
 }
 
-// Unpack implements upspin.BlockUnpacker.
-func (bp *blockUnpacker) Unpack(ciphertext []byte) (cleartext []byte, err error) {
-	const op errors.Op = "pack/eeintegrity.blockUpacker.Unpack"
+// UnpackBlock implements upspin.BlockUnpacker.
+func (bp *blockUnpacker) UnpackBlock(dst, ciphertext []byte, n int) error {
+	const op errors.Op = "pack/eeintegrity.blockUpacker.UnpackBlock"
 	// Validate checksum.
 	b := sha256.Sum256(ciphertext)
 	sum := b[:]
-	if got, want := sum, bp.entry.Blocks[bp.Block].Packdata; !bytes.Equal(got, want) {
-		return nil, errors.E(op, bp.entry.Name, "checksum mismatch")
+	if got, want := sum, bp.entry.Blocks[n].Packdata; !bytes.Equal(got, want) {
+		return errors.E(op, bp.entry.Name, "checksum mismatch")
 	}
 
-	cleartext = bp.buf.Bytes(len(ciphertext))
-	copy(cleartext, ciphertext)
+	copy(dst, ciphertext)
 
+	return nil
+}
+
+// Unpack implements upspin.BlockUnpacker.
+func (bp *blockUnpacker) Unpack(ciphertext []byte) (cleartext []byte, err error) {
+	cleartext = bp.buf.Bytes(len(ciphertext))
+	if err := bp.UnpackBlock(cleartext, ciphertext, bp.Block); err != nil {
+		return nil, err
+	}
 	return cleartext, nil
 }
 

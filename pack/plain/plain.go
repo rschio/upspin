@@ -180,6 +180,14 @@ type blockUnpacker struct {
 	internal.BlockTracker // provides NextBlock method and Block field
 }
 
+func (bp *blockUnpacker) UnpackBlock(dst, ciphertext []byte, _ int) error {
+	if len(dst) < len(ciphertext) {
+		panic("UnpackBlock: len(dst) should be >= than len(ciphertext)")
+	}
+	copy(dst, ciphertext)
+	return nil
+}
+
 func (bp *blockUnpacker) Unpack(ciphertext []byte) (cleartext []byte, err error) {
 	cleartext = ciphertext
 	return

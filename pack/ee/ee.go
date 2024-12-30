@@ -340,22 +340,27 @@ type blockUnpacker struct {
 	buf internal.LazyBuffer
 }
 
-func (bp *blockUnpacker) Unpack(ciphertext []byte) (cleartext []byte, err error) {
-	const op errors.Op = "pack/ee.blockUnpacker.Unpack"
+func (bp *blockUnpacker) UnpackBlock(dst, ciphertext []byte, n int) error {
+	const op errors.Op = "pack/ee.blockUnpacker.UnpackBlock"
 	// Validate checksum.
 	b := sha256.Sum256(ciphertext)
 	sum := b[:]
-	if got, want := sum, bp.entry.Blocks[bp.Block].Packdata; !bytes.Equal(got, want) {
-		return nil, errors.E(op, bp.entry.Name, "checksum mismatch")
+	if got, want := sum, bp.entry.Blocks[n].Packdata; !bytes.Equal(got, want) {
+		return errors.E(op, bp.entry.Name, "checksum mismatch")
 	}
-
-	cleartext = bp.buf.Bytes(len(ciphertext))
 
 	// Decrypt.
-	if err := crypt(cleartext, ciphertext, bp.cipher, bp.entry.Blocks[bp.Block].Offset); err != nil {
-		return nil, errors.E(op, bp.entry.Name, err)
+	if err := crypt(dst, ciphertext, bp.cipher, bp.entry.Blocks[n].Offset); err != nil {
+		return errors.E(op, bp.entry.Name, err)
 	}
 
+	return nil
+}
+func (bp *blockUnpacker) Unpack(ciphertext []byte) (cleartext []byte, err error) {
+	cleartext = bp.buf.Bytes(len(ciphertext))
+	if err := bp.UnpackBlock(cleartext, ciphertext, bp.Block); err != nil {
+		return nil, err
+	}
 	return cleartext, nil
 }
 

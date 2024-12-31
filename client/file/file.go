@@ -122,8 +122,8 @@ func (f *File) readAt(op errors.Op, dst []byte, off int64) (n int, err error) {
 		return 0, io.EOF
 	}
 
-	// Iterate over blocks that contain the data we're interested in,
-	// and unpack and copy the data to dst.
+	// Find the first and the last block.
+	begin, end := -1, len(f.entry.Blocks)
 	for i := range f.entry.Blocks {
 		b := &f.entry.Blocks[i]
 
@@ -131,47 +131,107 @@ func (f *File) readAt(op errors.Op, dst []byte, off int64) (n int, err error) {
 			// This block is before our interest.
 			continue
 		}
+
+		if begin == -1 {
+			begin = i
+		}
+
 		if b.Offset >= off+int64(len(dst)) {
 			// This block is beyond our interest.
+			end = i
 			break
 		}
+	}
 
-		if _, ok := f.bu.SeekBlock(i); !ok {
-			return 0, errors.E(op, errors.IO, f.name, errors.Errorf("could not seek to block %d", i))
+	if begin == f.lastBlockIndex {
+		// This was the last block read, we have it stored.
+		buf := f.lastBlockBytes
+		i := 0
+		if off > f.entry.Blocks[begin].Offset {
+			i = int(off - f.entry.Blocks[begin].Offset)
 		}
 
-		var clear []byte
-		if i == f.lastBlockIndex {
-			// If this is the block we last read (will often happen
-			// with sequential reads) then use that content,
-			// to avoid reading and unpacking again.
-			// TODO(adg): write a test to ensure this is happening.
-			clear = f.lastBlockBytes
-		} else {
-			// Otherwise, we need to read the block and unpack.
-			cipher, err := clientutil.ReadLocation(f.config, b.Location)
+		written := copy(dst[n:], buf[i:])
+		n += written
+
+		if written < len(buf[i:]) {
+			return n, nil
+		}
+
+		begin++
+		if begin == end {
+			if n < len(dst) {
+				err = io.EOF
+			}
+			return n, err
+		}
+	}
+
+	lb := new(lazyBuffer)
+	if off > f.entry.Blocks[begin].Offset {
+		// This for has only 1 iteration.
+		for b := range clientutil.BlockIter(f.config, f.bu, begin, begin+1) {
+			buf := lb.Bytes(len(b.Cipher))
+			err := f.bu.UnpackBlock(buf, b.Cipher, b.BlockNumber)
 			if err != nil {
 				return 0, errors.E(op, errors.IO, f.name, err)
 			}
-			clear, err = f.bu.Unpack(cipher)
-			if err != nil {
-				return 0, errors.E(op, errors.IO, f.name, err)
+
+			i := int(off - f.entry.Blocks[begin].Offset)
+			written := copy(dst[n:], buf[i:])
+			n += written
+
+			f.lastBlockIndex = b.BlockNumber
+			f.lastBlockBytes = buf
+
+			if written < len(buf[i:]) {
+				return n, nil
 			}
-			f.lastBlockIndex = i
-			f.lastBlockBytes = clear
 		}
 
-		clearIdx := 0
-		if off > b.Offset {
-			clearIdx = int(off - b.Offset)
+		begin++
+	}
+
+	for b := range clientutil.BlockIter(f.config, f.bu, begin, end) {
+		if b.Err != nil {
+			return 0, errors.E(op, errors.IO, f.name, b.Err)
 		}
-		n += copy(dst[n:], clear[clearIdx:])
+
+		buf := lb.Bytes(len(b.Cipher))
+		err := f.bu.UnpackBlock(buf, b.Cipher, b.BlockNumber)
+		if err != nil {
+			return 0, errors.E(op, errors.IO, f.name, err)
+		}
+
+		written := copy(dst[n:], buf[:])
+		n += written
+
+		f.lastBlockIndex = b.BlockNumber
+		f.lastBlockBytes = buf
+		if written < len(b.Cipher) {
+			break
+		}
 	}
 
 	if n < len(dst) {
 		err = io.EOF
 	}
 	return n, err
+}
+
+// Copied from lazybuffer.
+
+// lazyBuffer is a []byte that is lazily (re-)allocated when its
+// Bytes method is called.
+type lazyBuffer []byte
+
+// Bytes returns a []byte that has length n. It re-uses the underlying
+// LazyBuffer []byte if it is at least n bytes in length.
+func (b *lazyBuffer) Bytes(n int) []byte {
+	if *b == nil || len(*b) < n {
+		*b = make([]byte, n)
+	}
+	return (*b)[:n]
 }
 
 // Seek implements upspin.File.

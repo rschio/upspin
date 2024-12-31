@@ -40,10 +40,11 @@ func ReadAll(cfg upspin.Config, entry *upspin.DirEntry) ([]byte, error) {
 	return readAll(cfg, entry)
 }
 
-// BlockIter iters blocks[begin:end].
-func BlockIter(cfg upspin.Config, bu upspin.BlockUnpacker, begin, end int) iter.Seq[NCipher] {
-	concurrency := 16
-	ciphers := make(chan NCipher)
+// BlockIterClear iters blocks[begin:end] returning the blocks unpacked,
+// the returned is slice is only valid until the next iteration.
+func BlockIterClear(cfg upspin.Config, bu upspin.BlockUnpacker, begin, end int) iter.Seq2[[]byte, error] {
+	concurrency := 32
+	ciphers := make(chan nCipher)
 
 	// Used to stop producer when this function returns, caused by an error.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -71,12 +72,12 @@ func BlockIter(cfg upspin.Config, bu upspin.BlockUnpacker, begin, end int) iter.
 				defer func() { <-sema }()
 				defer wg.Done()
 
-				var result NCipher
+				var result nCipher
 				cipher, err := ReadLocation(cfg, block.Location)
 				if err != nil {
-					result = NCipher{BlockNumber: n, Cipher: nil, Err: errors.E(err)}
+					result = nCipher{BlockNumber: n, Cipher: nil, Err: errors.E(err)}
 				} else {
-					result = NCipher{BlockNumber: n, Cipher: cipher}
+					result = nCipher{BlockNumber: n, Cipher: cipher}
 				}
 
 				select {
@@ -92,11 +93,12 @@ func BlockIter(cfg upspin.Config, bu upspin.BlockUnpacker, begin, end int) iter.
 		}
 	}()
 
-	return func(yield func(NCipher) bool) {
+	return func(yield func([]byte, error) bool) {
 		defer cancel()
 
 		window := newSlidingWindow(concurrency)
 		pos := begin
+		buf := new(lazyBuffer)
 
 		for in := range ciphers {
 			// Got a block that should be unpacked in the future.
@@ -109,14 +111,30 @@ func BlockIter(cfg upspin.Config, bu upspin.BlockUnpacker, begin, end int) iter.
 					continue
 				}
 			}
-			if !yield(in) {
+			if in.Err != nil {
+				if !yield(nil, in.Err) {
+					return
+				}
+			}
+
+			cleartext := buf.Bytes(len(in.Cipher))
+			err := bu.UnpackBlock(cleartext, in.Cipher, in.BlockNumber)
+			if !yield(cleartext, err) {
 				return
 			}
 			pos++
 		}
 		for window.len() > 0 {
 			in, _ := window.pop(pos) // Always found.
-			if !yield(in) {
+			if in.Err != nil {
+				if !yield(nil, in.Err) {
+					return
+				}
+			}
+
+			cleartext := buf.Bytes(len(in.Cipher))
+			err := bu.UnpackBlock(cleartext, in.Cipher, in.BlockNumber)
+			if !yield(cleartext, err) {
 				return
 			}
 			pos++
@@ -134,44 +152,49 @@ func readAll(cfg upspin.Config, entry *upspin.DirEntry) ([]byte, error) {
 		return nil, errors.E(entry.Name, err) // Showstopper.
 	}
 
-	size, err := entry.Size()
-	if err != nil {
-		return nil, err
-	}
-
-	data := make([]byte, size)
-
-	i := 0
-	for b := range BlockIter(cfg, bu, 0, len(entry.Blocks)) {
-		if b.Err != nil {
-			return nil, b.Err
-		}
-		if err := bu.UnpackBlock(data[i:], b.Cipher, b.BlockNumber); err != nil {
+	var data []byte
+	for cleartext, err := range BlockIterClear(cfg, bu, 0, len(entry.Blocks)) {
+		if err != nil {
 			return nil, err
 		}
-		i += len(b.Cipher)
+		data = append(data, cleartext...)
 	}
 
 	return data, nil
 }
 
+// Copied from lazybuffer.
+
+// lazyBuffer is a []byte that is lazily (re-)allocated when its
+// Bytes method is called.
+type lazyBuffer []byte
+
+// Bytes returns a []byte that has length n. It re-uses the underlying
+// LazyBuffer []byte if it is at least n bytes in length.
+func (b *lazyBuffer) Bytes(n int) []byte {
+	if *b == nil || len(*b) < n {
+		*b = make([]byte, n)
+	}
+	return (*b)[:n]
+}
+
 type slidingWindow struct {
-	window []NCipher
+	window []nCipher
 }
 
 func newSlidingWindow(cap int) *slidingWindow {
-	return &slidingWindow{window: make([]NCipher, 0, cap)}
+	return &slidingWindow{window: make([]nCipher, 0, cap)}
 }
 
 func (w *slidingWindow) len() int {
 	return len(w.window)
 }
 
-func (w *slidingWindow) append(nc NCipher) {
+func (w *slidingWindow) append(nc nCipher) {
 	w.window = append(w.window, nc)
 }
 
-func (w *slidingWindow) pop(blockNumber int) (nc NCipher, found bool) {
+func (w *slidingWindow) pop(blockNumber int) (nc nCipher, found bool) {
 	for i, val := range w.window {
 		if val.BlockNumber == blockNumber {
 			last := len(w.window) - 1
@@ -181,10 +204,10 @@ func (w *slidingWindow) pop(blockNumber int) (nc NCipher, found bool) {
 		}
 	}
 
-	return NCipher{}, false
+	return nCipher{}, false
 }
 
-type NCipher struct {
+type nCipher struct {
 	BlockNumber int
 	Cipher      []byte
 	Err         error

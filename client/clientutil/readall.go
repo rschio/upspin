@@ -8,12 +8,12 @@ package clientutil // import "upspin.io/client/clientutil"
 
 import (
 	"context"
+	"iter"
 	"sync"
 
 	"upspin.io/access"
 	"upspin.io/bind"
 	"upspin.io/errors"
-	"upspin.io/log"
 	"upspin.io/pack"
 	"upspin.io/path"
 	"upspin.io/upspin"
@@ -40,6 +40,90 @@ func ReadAll(cfg upspin.Config, entry *upspin.DirEntry) ([]byte, error) {
 	return readAll(cfg, entry)
 }
 
+// BlockIter iters blocks[begin:end].
+func BlockIter(cfg upspin.Config, bu upspin.BlockUnpacker, begin, end int) iter.Seq[NCipher] {
+	concurrency := 16
+	ciphers := make(chan NCipher)
+
+	// Used to stop producer when this function returns, caused by an error.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Producer.
+	go func() {
+		sema := make(chan struct{}, concurrency)
+		var wg sync.WaitGroup
+
+		defer func() {
+			wg.Wait()
+			close(ciphers)
+		}()
+
+		block, ok := bu.SeekBlock(begin)
+		if !ok { // EOF.
+			return
+		}
+
+		for n := begin; n < end && ctx.Err() == nil; n++ {
+			sema <- struct{}{}
+			wg.Add(1)
+
+			go func(block upspin.DirBlock) {
+				defer func() { <-sema }()
+				defer wg.Done()
+
+				var result NCipher
+				cipher, err := ReadLocation(cfg, block.Location)
+				if err != nil {
+					result = NCipher{BlockNumber: n, Cipher: nil, Err: errors.E(err)}
+				} else {
+					result = NCipher{BlockNumber: n, Cipher: cipher}
+				}
+
+				select {
+				case ciphers <- result:
+				case <-ctx.Done():
+				}
+			}(block)
+
+			block, ok = bu.NextBlock()
+			if !ok { // EOF.
+				return
+			}
+		}
+	}()
+
+	return func(yield func(NCipher) bool) {
+		defer cancel()
+
+		window := newSlidingWindow(concurrency)
+		pos := begin
+
+		for in := range ciphers {
+			// Got a block that should be unpacked in the future.
+			if in.BlockNumber != pos {
+				window.append(in)
+				// Check if there is a block to be unpacked now.
+				var found bool
+				in, found = window.pop(pos)
+				if !found {
+					continue
+				}
+			}
+			if !yield(in) {
+				return
+			}
+			pos++
+		}
+		for window.len() > 0 {
+			in, _ := window.pop(pos) // Always found.
+			if !yield(in) {
+				return
+			}
+			pos++
+		}
+	}
+}
+
 func readAll(cfg upspin.Config, entry *upspin.DirEntry) ([]byte, error) {
 	packer := pack.Lookup(entry.Packing)
 	if packer == nil {
@@ -50,127 +134,46 @@ func readAll(cfg upspin.Config, entry *upspin.DirEntry) ([]byte, error) {
 		return nil, errors.E(entry.Name, err) // Showstopper.
 	}
 
-	concurrency := 32
-	ciphers := make(chan nCipher)
-
-	// Used to stop producer when this function returns, caused by an error.
-	ctx, cancel := context.WithCancel(context.Background())
-
-	producerDone := make(chan struct{})
-	// Producer.
-	go func() {
-		sema := make(chan struct{}, concurrency)
-		var wg sync.WaitGroup
-
-		defer func() {
-			wg.Wait()
-			close(ciphers)
-			close(producerDone)
-		}()
-
-		for n := 0; ctx.Err() == nil; n++ {
-			block, ok := bu.NextBlock()
-			if !ok {
-				break // EOF
-			}
-
-			sema <- struct{}{}
-			wg.Add(1)
-			go func() {
-				defer func() { <-sema }()
-				defer wg.Done()
-
-				var result nCipher
-				cipher, err := ReadLocation(cfg, block.Location)
-				if err != nil {
-					result = nCipher{blockNumber: n, err: errors.E(err)}
-				} else {
-					result = nCipher{blockNumber: n, cipher: cipher}
-				}
-
-				select {
-				case ciphers <- result:
-				case <-ctx.Done():
-				}
-			}()
-		}
-	}()
-
-	consumerDone := make(chan struct{})
-	go func() {
-		<-producerDone
-		<-consumerDone
-		bu.Close()
-		log.Debug.Println("closed BlockUnpacker")
-	}()
-
-	// Consumer
-	defer func() { close(consumerDone) }()
-	defer cancel()
-
-	window := newSlidingWindow(concurrency)
-	pos := 0
-
-	lastBlock := entry.Blocks[len(entry.Blocks)-1]
-	data := make([]byte, lastBlock.Offset+lastBlock.Size)
-	di := 0
-	for in := range ciphers {
-		if in.err != nil {
-			return nil, err
-		}
-		// Got a block that should be unpacked in the future.
-		if in.blockNumber != pos {
-			window.append(in)
-			// Check if there is a block to be unpacked now.
-			var found bool
-			in, found = window.pop(pos)
-			if !found {
-				continue
-			}
-		}
-
-		// in.err is already checked.
-		err := bu.UnpackBlock(data[di:], in.cipher, in.blockNumber)
-		if err != nil {
-			return nil, err
-		}
-		di += len(in.cipher)
-		pos++
+	size, err := entry.Size()
+	if err != nil {
+		return nil, err
 	}
-	// Process the remaining blocks.
-	for window.len() > 0 {
-		in, _ := window.pop(pos) // Always found.
-		// in.err is already checked.
-		err := bu.UnpackBlock(data[di:], in.cipher, in.blockNumber)
-		if err != nil {
+
+	data := make([]byte, size)
+
+	i := 0
+	for b := range BlockIter(cfg, bu, 0, len(entry.Blocks)) {
+		if b.Err != nil {
+			return nil, b.Err
+		}
+		if err := bu.UnpackBlock(data[i:], b.Cipher, b.BlockNumber); err != nil {
 			return nil, err
 		}
-		di += len(in.cipher)
-		pos++
+		i += len(b.Cipher)
 	}
 
 	return data, nil
 }
 
 type slidingWindow struct {
-	window []nCipher
+	window []NCipher
 }
 
 func newSlidingWindow(cap int) *slidingWindow {
-	return &slidingWindow{window: make([]nCipher, 0, cap)}
+	return &slidingWindow{window: make([]NCipher, 0, cap)}
 }
 
 func (w *slidingWindow) len() int {
 	return len(w.window)
 }
 
-func (w *slidingWindow) append(nc nCipher) {
+func (w *slidingWindow) append(nc NCipher) {
 	w.window = append(w.window, nc)
 }
 
-func (w *slidingWindow) pop(blockNumber int) (nc nCipher, found bool) {
+func (w *slidingWindow) pop(blockNumber int) (nc NCipher, found bool) {
 	for i, val := range w.window {
-		if val.blockNumber == blockNumber {
+		if val.BlockNumber == blockNumber {
 			last := len(w.window) - 1
 			w.window[last], w.window[i] = w.window[i], w.window[last]
 			w.window = w.window[:len(w.window)-1]
@@ -178,13 +181,13 @@ func (w *slidingWindow) pop(blockNumber int) (nc nCipher, found bool) {
 		}
 	}
 
-	return nCipher{}, false
+	return NCipher{}, false
 }
 
-type nCipher struct {
-	blockNumber int
-	cipher      []byte
-	err         error
+type NCipher struct {
+	BlockNumber int
+	Cipher      []byte
+	Err         error
 }
 
 // ReadLocation uses the provided Config to fetch the contents of the given

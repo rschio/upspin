@@ -122,8 +122,8 @@ func (f *File) readAt(op errors.Op, dst []byte, off int64) (n int, err error) {
 		return 0, io.EOF
 	}
 
-	// Iterate over blocks that contain the data we're interested in,
-	// and unpack and copy the data to dst.
+	// Find the first and the last block.
+	begin, end := -1, len(f.entry.Blocks)
 	for i := range f.entry.Blocks {
 		b := &f.entry.Blocks[i]
 
@@ -131,46 +131,58 @@ func (f *File) readAt(op errors.Op, dst []byte, off int64) (n int, err error) {
 			// This block is before our interest.
 			continue
 		}
+
+		if begin == -1 {
+			begin = i
+		}
+
 		if b.Offset >= off+int64(len(dst)) {
 			// This block is beyond our interest.
+			end = i
 			break
 		}
+	}
 
-		if _, ok := f.bu.SeekBlock(i); !ok {
-			return 0, errors.E(op, errors.IO, f.name, errors.Errorf("could not seek to block %d", i))
+	if begin == f.lastBlockIndex {
+		// This was the last block read, we have it stored.
+		clear := f.lastBlockBytes
+
+		b := f.entry.Blocks[begin]
+		clearIdx := 0
+		if off > b.Offset {
+			clearIdx = int(off - b.Offset)
 		}
 
-		var clear []byte
-		if i == f.lastBlockIndex {
-			// If this is the block we last read (will often happen
-			// with sequential reads) then use that content,
-			// to avoid reading and unpacking again.
-			// TODO(adg): write a test to ensure this is happening.
-			clear = f.lastBlockBytes
-		} else {
-			// Otherwise, we need to read the block and unpack.
-			cipher, err := clientutil.ReadLocation(f.config, b.Location)
-			if err != nil {
-				return 0, errors.E(op, errors.IO, f.name, err)
-			}
-			clear, err = f.bu.Unpack(cipher)
-			if err != nil {
-				return 0, errors.E(op, errors.IO, f.name, err)
-			}
-			f.lastBlockIndex = i
-			f.lastBlockBytes = clear
-		}
+		written := copy(dst[n:], clear[clearIdx:])
+		n += written
 
+		if written < len(clear[clearIdx:]) {
+			return n, nil
+		}
+		begin++
+	}
+
+	bIdx := begin
+	for clear, err := range clientutil.BlockIter(f.config, f.bu, begin, end) {
+		if err != nil {
+			return 0, errors.E(op, errors.IO, f.name, err)
+		}
+		f.lastBlockIndex = bIdx
+		f.lastBlockBytes = clear
+
+		b := f.entry.Blocks[bIdx]
 		clearIdx := 0
 		if off > b.Offset {
 			clearIdx = int(off - b.Offset)
 		}
 		n += copy(dst[n:], clear[clearIdx:])
+		bIdx++
 	}
 
 	if n < len(dst) {
 		err = io.EOF
 	}
+
 	return n, err
 }
 

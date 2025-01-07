@@ -1,6 +1,6 @@
 module upspin.io
 
-go 1.20
+go 1.24rc1
 
 require (
 	github.com/NYTimes/gziphandler v1.1.1

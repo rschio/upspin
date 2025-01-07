@@ -7,6 +7,10 @@
 package clientutil // import "upspin.io/client/clientutil"
 
 import (
+	"context"
+	"iter"
+	"sync"
+
 	"upspin.io/access"
 	"upspin.io/bind"
 	"upspin.io/errors"
@@ -42,24 +46,189 @@ func ReadAll(cfg upspin.Config, entry *upspin.DirEntry) ([]byte, error) {
 	if err != nil {
 		return nil, errors.E(entry.Name, err) // Showstopper.
 	}
-	for {
-		block, ok := bu.NextBlock()
-		if !ok {
-			break // EOF
-		}
-		// block is known valid as per valid.DirEntry above.
 
-		cipher, err := ReadLocation(cfg, block.Location)
+	for cleartext, err := range BlockIter(cfg, bu, 0, len(entry.Blocks)) {
 		if err != nil {
-			return nil, errors.E(err)
+			return nil, err
 		}
-		clear, err := bu.Unpack(cipher)
-		if err != nil {
-			return nil, errors.E(entry.Name, err)
-		}
-		data = append(data, clear...) // TODO: Could avoid a copy if only one block.
+		data = append(data, cleartext...)
 	}
+
 	return data, nil
+}
+
+// BlockIter iters blocks[begin:end] returning the blocks unpacked,
+// the returned slice is only valid until the next iteration.
+func BlockIter(cfg upspin.Config, bu upspin.BlockUnpacker, begin, end int) iter.Seq2[[]byte, error] {
+	concurrency := 32
+	ciphers := make(chan nCipher)
+
+	// Used to stop producer when this function returns, caused by an error.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// We receive a BlockUnpacker and use it in a go func that
+	// can outlive the iterator.
+	// The BlockUnpacker has some stateful methods and those are
+	// affected by NextBlock and SeekBlock.
+	// Inside this function we unpack the blocks using UnpackBlock that
+	// is stateless so it's safe to unpack concurrently with NextBLock,
+	// but if the caller use the BlockUnpacker while we are calling NextBlock
+	// this would cause a data race. To avoid it we use this mutex.
+	var buMutex sync.Mutex
+	var isDone bool
+	nextBlock := func() (upspin.DirBlock, bool) {
+		buMutex.Lock()
+		defer buMutex.Unlock()
+		if isDone {
+			return upspin.DirBlock{}, false
+		}
+		return bu.NextBlock()
+	}
+
+	// Call SeekBlock outside of gofunc to avoid using mutex
+	// like in nextBlock.
+	block, ok := bu.SeekBlock(begin)
+	if !ok { // EOF.
+		return func(yield func([]byte, error) bool) {}
+	}
+
+	// Producer.
+	go func() {
+		sema := make(chan struct{}, concurrency)
+		var wg sync.WaitGroup
+
+		defer func() {
+			wg.Wait()
+			close(ciphers)
+		}()
+
+		for n := begin; n < end && ctx.Err() == nil; n++ {
+			sema <- struct{}{}
+			wg.Add(1)
+
+			go func(block upspin.DirBlock) {
+				defer func() { <-sema }()
+				defer wg.Done()
+
+				var result nCipher
+				cipher, err := ReadLocation(cfg, block.Location)
+				if err != nil {
+					result = nCipher{BlockNumber: n, Cipher: nil, Err: errors.E(err)}
+				} else {
+					result = nCipher{BlockNumber: n, Cipher: cipher}
+				}
+
+				select {
+				case ciphers <- result:
+				case <-ctx.Done():
+				}
+			}(block)
+
+			block, ok = nextBlock()
+			if !ok {
+				return
+			}
+		}
+	}()
+
+	return func(yield func([]byte, error) bool) {
+		defer func() {
+			// Signal the producer concurrent function that the
+			// iterator stopped and it's not safe to call bu.NextBlock.
+			buMutex.Lock()
+			isDone = true
+			buMutex.Unlock()
+		}()
+		defer cancel()
+
+		window := newSlidingWindow(concurrency)
+		pos := begin
+		buf := new(lazyBuffer)
+
+		yieldCipher := func(in nCipher) bool {
+			if in.Err != nil {
+				return yield(nil, in.Err)
+			}
+
+			cleartext := buf.Bytes(len(in.Cipher))
+			err := bu.UnpackBlock(cleartext, in.Cipher, in.BlockNumber)
+			return yield(cleartext, err)
+		}
+
+		for in := range ciphers {
+			// Got a block that should be unpacked in the future.
+			if in.BlockNumber != pos {
+				window.append(in)
+				// Check if there is a block to be unpacked now.
+				var found bool
+				in, found = window.pop(pos)
+				if !found {
+					continue
+				}
+			}
+			if !yieldCipher(in) {
+				return
+			}
+			pos++
+		}
+		for window.len() > 0 {
+			in, _ := window.pop(pos) // Always found.
+			if !yieldCipher(in) {
+				return
+			}
+			pos++
+		}
+	}
+}
+
+// Copied from lazybuffer.
+
+// lazyBuffer is a []byte that is lazily (re-)allocated when its
+// Bytes method is called.
+type lazyBuffer []byte
+
+// Bytes returns a []byte that has length n. It re-uses the underlying
+// LazyBuffer []byte if it is at least n bytes in length.
+func (b *lazyBuffer) Bytes(n int) []byte {
+	if *b == nil || len(*b) < n {
+		*b = make([]byte, n)
+	}
+	return (*b)[:n]
+}
+
+type slidingWindow struct {
+	window []nCipher
+}
+
+func newSlidingWindow(cap int) *slidingWindow {
+	return &slidingWindow{window: make([]nCipher, 0, cap)}
+}
+
+func (w *slidingWindow) len() int {
+	return len(w.window)
+}
+
+func (w *slidingWindow) append(nc nCipher) {
+	w.window = append(w.window, nc)
+}
+
+func (w *slidingWindow) pop(blockNumber int) (nc nCipher, found bool) {
+	for i, val := range w.window {
+		if val.BlockNumber == blockNumber {
+			last := len(w.window) - 1
+			w.window[last], w.window[i] = w.window[i], w.window[last]
+			w.window = w.window[:len(w.window)-1]
+			return val, true
+		}
+	}
+
+	return nCipher{}, false
+}
+
+type nCipher struct {
+	BlockNumber int
+	Cipher      []byte
+	Err         error
 }
 
 // ReadLocation uses the provided Config to fetch the contents of the given

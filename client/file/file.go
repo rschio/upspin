@@ -10,7 +10,6 @@ import (
 
 	"upspin.io/client/clientutil"
 	"upspin.io/errors"
-	"upspin.io/pack"
 	"upspin.io/upspin"
 )
 
@@ -29,10 +28,9 @@ type File struct {
 	closed   bool            // Whether the file has been closed, preventing further operations.
 
 	// Used only by readers.
-	config upspin.Config
+	unpack *clientutil.BUIter
 	entry  *upspin.DirEntry
 	size   int64
-	bu     upspin.BlockUnpacker
 	// Keep the most recently unpacked block around
 	// in case a subsequent readAt starts at the same place.
 	lastBlockIndex int
@@ -51,11 +49,7 @@ func Readable(cfg upspin.Config, entry *upspin.DirEntry) (*File, error) {
 	// TODO(adg): check if this is a dir or link?
 	const op errors.Op = "client/file.Readable"
 
-	packer := pack.Lookup(entry.Packing)
-	if packer == nil {
-		return nil, errors.E(op, entry.Name, errors.Invalid, errors.Errorf("unrecognized Packing %d", entry.Packing))
-	}
-	bu, err := packer.Unpack(cfg, entry)
+	buIter, err := clientutil.NewBUIter(cfg, entry)
 	if err != nil {
 		return nil, errors.E(op, entry.Name, err)
 	}
@@ -65,12 +59,11 @@ func Readable(cfg upspin.Config, entry *upspin.DirEntry) (*File, error) {
 	}
 
 	return &File{
-		config:         cfg,
 		name:           entry.Name,
 		writable:       false,
+		unpack:         buIter,
 		entry:          entry,
 		size:           size,
-		bu:             bu,
 		lastBlockIndex: -1,
 	}, nil
 }
@@ -156,14 +149,14 @@ func (f *File) readAt(op errors.Op, dst []byte, off int64) (n int, err error) {
 		written := copy(dst[n:], clear[clearIdx:])
 		n += written
 
-		if written < len(clear[clearIdx:]) {
+		if written < len(clear[clearIdx:]) { // Fast path.
 			return n, nil
 		}
 		begin++
 	}
 
 	bIdx := begin
-	for clear, err := range clientutil.BlockIter(f.config, f.bu, begin, end) {
+	for clear, err := range f.unpack.Slice(begin, end) {
 		if err != nil {
 			return 0, errors.E(op, errors.IO, f.name, err)
 		}
@@ -272,7 +265,7 @@ func (f *File) Close() error {
 	if !f.writable {
 		f.lastBlockIndex = -1
 		f.lastBlockBytes = nil
-		if err := f.bu.Close(); err != nil {
+		if err := f.unpack.Close(); err != nil {
 			return errors.E(op, err)
 		}
 		return nil

@@ -70,6 +70,7 @@ func (b *BUIter) Slice(begin, end int) iter.Seq2[[]byte, error] {
 				if !yield(nil, errors.E(c.err)) {
 					return
 				}
+				continue
 			}
 
 			cleartext := b.buf.Bytes(len(c.cipher))
@@ -81,6 +82,8 @@ func (b *BUIter) Slice(begin, end int) iter.Seq2[[]byte, error] {
 	}
 }
 
+// ciphers downloads the DirEntry blocks concurrently and returns a channel that
+// send the download results sorted by block number.
 func (b *BUIter) ciphers(ctx context.Context, begin, end int) <-chan nCipher {
 	ciphers := make(chan nCipher)
 	bufs := make([]chan nCipher, b.concurrency)
@@ -90,12 +93,12 @@ func (b *BUIter) ciphers(ctx context.Context, begin, end int) <-chan nCipher {
 
 	go func() {
 		defer close(ciphers)
-		for pos := begin; pos < end; pos++ {
+		for n := begin; n < end; n++ {
 			select {
 			// Consume the results in the correct order.
-			case val := <-bufs[pos%b.concurrency]:
+			case v := <-bufs[n%b.concurrency]:
 				select {
-				case ciphers <- val:
+				case ciphers <- v:
 				case <-ctx.Done():
 					return
 				}
@@ -112,7 +115,7 @@ func (b *BUIter) ciphers(ctx context.Context, begin, end int) <-chan nCipher {
 	// is consumed.
 	go func() {
 		sema := make(chan struct{}, b.concurrency)
-		for i, block := range b.entry.Blocks[begin:end] {
+		for n := begin; n < end; n++ {
 			sema <- struct{}{}
 
 			if ctx.Err() != nil {
@@ -121,12 +124,11 @@ func (b *BUIter) ciphers(ctx context.Context, begin, end int) <-chan nCipher {
 
 			go func() {
 				defer func() { <-sema }()
-				n := begin + i
-				cipher, err := ReadLocation(b.cfg, block.Location)
-				val := nCipher{blockNumber: n, err: err, cipher: cipher}
+				cipher, err := ReadLocation(b.cfg, b.entry.Blocks[n].Location)
+				v := nCipher{blockNumber: n, cipher: cipher, err: err}
 
 				select {
-				case bufs[n%b.concurrency] <- val:
+				case bufs[n%b.concurrency] <- v:
 				case <-ctx.Done():
 				}
 			}()

@@ -7,7 +7,7 @@
 package plain // import "upspin.io/pack/plain"
 
 import (
-	"crypto/ecdsa"
+	"crypto/mldsa"
 	"crypto/sha256"
 	"encoding/binary"
 	"math/big"
@@ -31,7 +31,7 @@ func init() {
 
 const (
 	aesKeyLen     = 32 // AES-256 because public cloud should withstand multifile multikey attack.
-	marshalBufLen = 66 // big enough for p521 according to (c.curve.Params().BitSize + 7) >> 3
+	marshalBufLen = mldsa.MLDSA87SignatureSize
 )
 
 var (
@@ -151,19 +151,15 @@ func (p plainPack) Unpack(cfg upspin.Config, d *upspin.DirEntry) (upspin.BlockUn
 	if err != nil {
 		return nil, errors.E(op, writer, err)
 	}
-	writerPubKey, err := factotum.ParsePublicKey(writerRawPubKey)
-	if err != nil {
-		return nil, errors.E(op, writer, err)
-	}
 
 	f := cfg.Factotum()
 	dkey := make([]byte, aesKeyLen)
 	sum := make([]byte, sha256.Size)
 	// Verify that this was signed with the writer's old or new public key.
 	vhash := f.DirEntryHash(d.SignedName, d.Link, d.Attr, d.Packing, d.Time, dkey, sum)
-	if !ecdsa.Verify(writerPubKey, vhash, sig.R, sig.S) &&
-		!ecdsa.Verify(writerPubKey, vhash, sig2.R, sig2.S) {
-		// Check sig2 in case writerPubKey is rotating.
+	if factotum.Verify(vhash, sig, writerRawPubKey) != nil &&
+		factotum.Verify(vhash, sig2, writerRawPubKey) != nil {
+		// Check sig2 in case writerRawPubKey is rotating.
 		return nil, errors.E(op, d.Name, writer, errVerify)
 		// TODO(ehg) If reader is owner, consider trying even older factotum keys.
 	}
@@ -238,12 +234,6 @@ func (p plainPack) Countersign(oldKey upspin.PublicKey, f upspin.Factotum, d *up
 		return errors.E(op, d.Name, errors.IsDir, "cannot sign directory")
 	}
 
-	// Get ECDSA form of old key.
-	oldPubKey, err := factotum.ParsePublicKey(oldKey)
-	if err != nil {
-		return errors.E(op, d.Name, err)
-	}
-
 	// Extract existing signatures, but keep only the newest.
 	sig, _, err := pdUnmarshal(d.Packdata)
 	if err != nil {
@@ -254,7 +244,7 @@ func (p plainPack) Countersign(oldKey upspin.PublicKey, f upspin.Factotum, d *up
 	dkey := make([]byte, aesKeyLen)
 	sum := make([]byte, sha256.Size)
 	vhash := f.DirEntryHash(d.SignedName, d.Link, d.Attr, d.Packing, d.Time, dkey, sum)
-	if !ecdsa.Verify(oldPubKey, vhash, sig.R, sig.S) {
+	if factotum.Verify(vhash, sig, oldKey) != nil {
 		return errors.E(op, d.Name, errVerify, "unable to verify existing signature")
 	}
 
@@ -293,13 +283,8 @@ func pdMarshal(dst *[]byte, sig, sig2 upspin.Signature) error {
 		*dst = make([]byte, n)
 	}
 	n = 0
-	n += packutil.PutBytes((*dst)[n:], sig.R.Bytes())
-	n += packutil.PutBytes((*dst)[n:], sig.S.Bytes())
-	if sig2.R == nil {
-		sig2 = upspin.Signature{R: zero, S: zero}
-	}
-	n += packutil.PutBytes((*dst)[n:], sig2.R.Bytes())
-	n += packutil.PutBytes((*dst)[n:], sig2.S.Bytes())
+	n += packutil.PutBytes((*dst)[n:], sig)
+	n += packutil.PutBytes((*dst)[n:], sig2)
 	*dst = (*dst)[:n]
 	return nil
 }
@@ -309,23 +294,15 @@ func pdUnmarshal(pd []byte) (sig, sig2 upspin.Signature, err error) {
 		return sig0, sig0, errors.Str("nil packdata")
 	}
 	n := 0
-	sig.R = big.NewInt(0)
-	sig.S = big.NewInt(0)
-	sig2.R = big.NewInt(0)
-	sig2.S = big.NewInt(0)
 	buf := make([]byte, marshalBufLen)
 	n += packutil.GetBytes(&buf, pd[n:])
-	sig.R.SetBytes(buf)
+	sig = append([]byte(nil), buf...)
 	n += packutil.GetBytes(&buf, pd[n:])
-	sig.S.SetBytes(buf)
-	n += packutil.GetBytes(&buf, pd[n:])
-	sig2.R.SetBytes(buf)
-	n += packutil.GetBytes(&buf, pd[n:])
-	sig2.S.SetBytes(buf)
+	sig2 = append([]byte(nil), buf...)
 	return sig, sig2, nil
 }
 
-// packdataLen returns n big enough for packing, sig.R, sig.S
+// packdataLen returns n big enough for packing.
 func packdataLen() int {
-	return 2*marshalBufLen + binary.MaxVarintLen64 + 1
+	return 2 * (marshalBufLen + binary.MaxVarintLen64)
 }

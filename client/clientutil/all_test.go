@@ -5,9 +5,9 @@
 package clientutil
 
 import (
+	"crypto/mldsa"
 	"crypto/sha256"
 	"encoding/binary"
-	"math/big"
 	"strconv"
 	"testing"
 
@@ -32,7 +32,7 @@ func init() {
 const (
 	userName      = "bob@smith.com"
 	aesKeyLen     = 32 // AES-256 because public cloud should withstand multifile multikey attack.
-	marshalBufLen = 66 // big enough for p521 according to (c.curve.Params().BitSize + 7) >> 3
+	marshalBufLen = mldsa.MLDSA87SignatureSize
 )
 
 var (
@@ -105,21 +105,15 @@ func pdMarshal(dst *[]byte, sig, sig2 upspin.Signature) error {
 		*dst = make([]byte, n)
 	}
 	n = 0
-	n += packutil.PutBytes((*dst)[n:], sig.R.Bytes())
-	n += packutil.PutBytes((*dst)[n:], sig.S.Bytes())
-	if sig2.R == nil {
-		zero := big.NewInt(0)
-		sig2 = upspin.Signature{R: zero, S: zero}
-	}
-	n += packutil.PutBytes((*dst)[n:], sig2.R.Bytes())
-	n += packutil.PutBytes((*dst)[n:], sig2.S.Bytes())
+	n += packutil.PutBytes((*dst)[n:], sig)
+	n += packutil.PutBytes((*dst)[n:], sig2)
 	*dst = (*dst)[:n]
 	return nil
 }
 
-// packdataLen returns n big enough for packing, sig.R, sig.S
+// packdataLen returns n big enough for packing.
 func packdataLen() int {
-	return 2*marshalBufLen + binary.MaxVarintLen64 + 1
+	return 2 * (marshalBufLen + binary.MaxVarintLen64)
 }
 
 func setupTestConfig(t *testing.T) upspin.Config {

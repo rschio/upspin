@@ -131,7 +131,7 @@ type Factotum interface {
 	FileSign(hash DEHash) (Signature, error)
 
 	// DecapsulateKey is used to decapsulate the shared AES key.
-	DecapsulateKey(keyHash, ciphertext, info []byte) ([]byte, error)
+	DecapsulateKey(keyHash, info, ciphertext []byte) ([]byte, error)
 
 	// Sign signs a slice of bytes with the factotum's private key.
 	// The argument hash should be a cryptographic hash of the message you want to sign.

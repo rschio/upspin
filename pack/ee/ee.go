@@ -15,14 +15,10 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
-	"io"
-
-	"golang.org/x/crypto/hkdf"
 
 	"upspin.io/bind"
 	"upspin.io/errors"
@@ -43,7 +39,7 @@ type ee struct{}
 
 const (
 	aesKeyLen            = 32 // AES-256 because public cloud should withstand multifile multikey attack.
-	marshalBufLen        = 66 // big enough for p521 according to (c.curve.Params().BitSize + 7) >> 3
+	marshalBufLen        = mldsa.MLDSA87SignatureSize
 	gcmStandardNonceSize = 12
 	gcmTagSize           = 16
 )
@@ -197,11 +193,8 @@ func (bp *blockPacker) Close() error {
 
 	// First, wrap for myself.
 	rp := cfg.Factotum().PublicKey()
-	p, err := factotum.ParsePublicKey(rp)
-	if err != nil {
-		return errors.E(op, name, err)
-	}
-	pd.wrap[0], err = gcmWrap(rp, p, bp.dkey)
+	var err error
+	pd.wrap[0], err = gcmWrap(rp, bp.dkey)
 	if err != nil {
 		return errors.E(op, name, err)
 	}
@@ -225,11 +218,7 @@ func (bp *blockPacker) Close() error {
 		if ownerKey == cfg.Factotum().PublicKey() {
 			log.Debug.Printf("pack/ee: %q and %q have the same keys", owner, cfg.UserName())
 		} else {
-			p, err = factotum.ParsePublicKey(ownerKey)
-			if err != nil {
-				return errors.E(op, name, owner, err)
-			}
-			wrap, err := gcmWrap(ownerKey, p, bp.dkey)
+			wrap, err := gcmWrap(ownerKey, bp.dkey)
 			if err != nil {
 				return errors.E(op, name, owner, err)
 			}
@@ -280,10 +269,6 @@ func (ee ee) Unpack(cfg upspin.Config, d *upspin.DirEntry) (upspin.BlockUnpacker
 	if err != nil {
 		return nil, errors.E(op, writer, err)
 	}
-	writerPubKey, err := factotum.ParsePublicKey(writerRawPubKey)
-	if err != nil {
-		return nil, errors.E(op, writer, err)
-	}
 
 	// Pull the decryption key out of the wrapped keys.
 	// For quick lookup, hash my public key and locate my wrapped key in the metadata.
@@ -310,9 +295,9 @@ func (ee ee) Unpack(cfg upspin.Config, d *upspin.DirEntry) (upspin.BlockUnpacker
 		}
 		// Verify that this was signed with the writer's old or new public key.
 		vhash := f.DirEntryHash(d.SignedName, d.Link, d.Attr, d.Packing, d.Time, dkey, pd.blockSum)
-		if !ecdsa.Verify(writerPubKey, vhash, pd.sig.R, pd.sig.S) &&
-			!ecdsa.Verify(writerPubKey, vhash, pd.sig2.R, pd.sig2.S) {
-			// Check sig2 in case writerPubKey is rotating.
+		if factotum.Verify(vhash, pd.sig, writerRawPubKey) != nil &&
+			factotum.Verify(vhash, pd.sig2, writerRawPubKey) != nil {
+			// Check sig2 in case writerRawPubKey is rotating.
 			return nil, errors.E(op, d.Name, writer, errVerify)
 			// TODO(ehg) If reader is owner, consider trying even older factotum keys.
 		}
@@ -385,16 +370,10 @@ func (ee ee) Share(cfg upspin.Config, readers []upspin.PublicKey, packdataSlice 
 	// For efficiency, Share() reuses the wrapped key for readers common to the old and new lists.
 
 	// Fetch all the public keys we'll need.
-	pubkey := make([]*ecdsa.PublicKey, len(readers))
 	hash := make([]keyHashArray, len(readers))
 	for i, pub := range readers {
 		if pub == upspin.AllUsersKey {
 			copy(hash[i][:], factotum.AllUsersKeyHash)
-			continue
-		}
-		var err error
-		pubkey[i], err = factotum.ParsePublicKey(pub)
-		if err != nil {
 			continue
 		}
 		copy(hash[i][:], factotum.KeyHash(pub))
@@ -440,20 +419,18 @@ func (ee ee) Share(cfg upspin.Config, readers []upspin.PublicKey, packdataSlice 
 		// Create new list of wrapped keys.
 		pd.wrap = make([]wrappedKey, 0, len(readers))
 		for i := range readers {
-			if pubkey[i] == nil {
-				if bytes.Equal(factotum.AllUsersKeyHash, hash[i][:]) {
-					// If readable by anyone,
-					// store the dkey unwrapped.
-					pd.wrap = append(pd.wrap, wrappedKey{
-						keyHash: factotum.AllUsersKeyHash,
-						dkey:    dkey,
-					})
-				}
+			if bytes.Equal(factotum.AllUsersKeyHash, hash[i][:]) {
+				// If readable by anyone,
+				// store the dkey unwrapped.
+				pd.wrap = append(pd.wrap, wrappedKey{
+					keyHash: factotum.AllUsersKeyHash,
+					dkey:    dkey,
+				})
 				continue
 			}
 			pw, ok := alreadyWrapped[hash[i]]
 			if !ok { // then need to wrap
-				w, err := gcmWrap(readers[i], pubkey[i], dkey)
+				w, err := gcmWrap(readers[i], dkey)
 				if err != nil {
 					continue
 				}
@@ -512,10 +489,6 @@ func (ee ee) updateDirEntry(op errors.Op, cfg upspin.Config, d *upspin.DirEntry,
 	if err != nil {
 		return errors.E(op, d.Name, err)
 	}
-	writerPubKey, err := factotum.ParsePublicKey(writerRawPubKey)
-	if err != nil {
-		return errors.E(op, d.Name, err)
-	}
 
 	// Now get my own keys.
 	me := cfg.UserName() // Recipient of the file is me (the user in the config)
@@ -558,9 +531,9 @@ func (ee ee) updateDirEntry(op errors.Op, cfg upspin.Config, d *upspin.DirEntry,
 
 	// Verify that this was signed with the writer's old or new public key.
 	vhash := f.DirEntryHash(d.SignedName, d.Link, d.Attr, d.Packing, d.Time, dkey, pd.blockSum)
-	if !ecdsa.Verify(writerPubKey, vhash, pd.sig.R, pd.sig.S) &&
-		!ecdsa.Verify(writerPubKey, vhash, pd.sig2.R, pd.sig2.S) {
-		// Check sig2 in case writerPubKey is rotating.
+	if factotum.Verify(vhash, pd.sig, writerRawPubKey) != nil &&
+		factotum.Verify(vhash, pd.sig2, writerRawPubKey) != nil {
+		// Check sig2 in case writerRawPubKey is rotating.
 		return errors.E(op, d.Name, errVerify)
 	}
 
@@ -596,12 +569,6 @@ func (ee ee) Countersign(oldKey upspin.PublicKey, f upspin.Factotum, d *upspin.D
 		return errors.E(op, d.Name, errors.IsDir, "cannot sign directory")
 	}
 
-	// Get ECDSA form of old key.
-	oldPubKey, err := factotum.ParsePublicKey(oldKey)
-	if err != nil {
-		return errors.E(op, d.Name, err)
-	}
-
 	// Extract existing signatures, but keep only the newest.
 	var pd packdata
 	if err := pd.Unmarshal(d.Packdata); err != nil {
@@ -628,7 +595,7 @@ func (ee ee) Countersign(oldKey upspin.PublicKey, f upspin.Factotum, d *upspin.D
 
 	// Verify existing signature with oldKey.
 	vhash := f.DirEntryHash(d.SignedName, d.Link, d.Attr, d.Packing, d.Time, dkey, pd.blockSum)
-	if !ecdsa.Verify(oldPubKey, vhash, pd.sig.R, pd.sig.S) {
+	if factotum.Verify(vhash, pd.sig, oldKey) != nil {
 		return errors.E(op, d.Name, errVerify, "unable to verify existing signature")
 	}
 
@@ -665,100 +632,23 @@ func (ee ee) UnpackableByAll(d *upspin.DirEntry) (bool, error) {
 	return false, nil
 }
 
-// gcmWrap implements NIST 800-56Ar2; see also RFC6637 §8.
-func gcmWrap(pub upspin.PublicKey, R *ecdsa.PublicKey, dkey []byte) (w wrappedKey, err error) {
-	// Step 1.  Create shared Diffie-Hellman secret.
-	// v, V=vG  ephemeral key pair
-	// S = vR   shared point
-	curve := R.Curve
-	// TODO(ehg)  Confirm that curve is one of our approved curves.
-	if !curve.IsOnCurve(R.X, R.Y) {
-		err = errNotOnCurve
-		return
-	}
-	v, err := ecdsa.GenerateKey(curve, rand.Reader)
-	if err != nil {
-		return
-	}
-	sx, sy := curve.ScalarMult(R.X, R.Y, v.D.Bytes())
-	S := elliptic.Marshal(curve, sx, sy)
-	w.ephemeral = ecdsa.PublicKey{Curve: curve, X: v.X, Y: v.Y}
+func gcmWrap(pub upspin.PublicKey, dkey []byte) (w wrappedKey, err error) {
+	mess := fmt.Appendf(nil, "%02x:%x", upspin.EEPack, factotum.KeyHash(pub))
 
-	// Step 2.  Convert shared secret to strong secret via HKDF.
-	w.nonce = make([]byte, gcmStandardNonceSize)
-	_, err = rand.Read(w.nonce)
+	keyHash, ciphertext, err := factotum.EncapsulateKey(pub, mess, dkey)
 	if err != nil {
-		return
-	}
-	w.keyHash = factotum.KeyHash(pub)
-	mess := []byte(fmt.Sprintf("%02x:%x:%x", upspin.EEPack, w.keyHash, w.nonce))
-	hash := sha256.New
-	hkdf := hkdf.New(hash, S, nil, mess) // TODO(security-reviewer) reconsider salt
-	strong := make([]byte, aesKeyLen)
-	_, err = io.ReadFull(hkdf, strong)
-	if err != nil {
-		return
+		return wrappedKey{}, err
 	}
 
-	// Step 3. Encrypt dkey.
-	block, err := aes.NewCipher(strong)
-	if err != nil {
-		return
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return
-	}
-	w.dkey = make([]byte, 0, len(dkey)+gcmTagSize)
-	w.dkey = aead.Seal(w.dkey, w.nonce, dkey, nil)
-	// TODO(ehg) figure out why aead.Seal allocated memory here
-	return
+	return wrappedKey{
+		keyHash: keyHash,
+		dkey:    ciphertext,
+	}, nil
 }
 
-// Extract per-file symmetric key from w.
-// If error, len(dkey)==0.
 func aesUnwrap(f upspin.Factotum, w wrappedKey) (dkey []byte, err error) {
-	myPub, err := f.PublicKeyFromHash(w.keyHash)
-	if err != nil {
-		return nil, err
-	}
-	// Step 1.  Create shared Diffie-Hellman secret.
-	// S = rV
-	pub, err := factotum.ParsePublicKey(myPub)
-	if err != nil {
-		return nil, err
-	}
-	sx, sy, err := f.ScalarMult(w.keyHash, pub.Curve, w.ephemeral.X, w.ephemeral.Y)
-	if err != nil {
-		return nil, err
-	}
-	S := elliptic.Marshal(pub.Curve, sx, sy)
-
-	// Step 2.  Convert shared secret to strong secret via HKDF.
-	mess := []byte(fmt.Sprintf("%02x:%x:%x", upspin.EEPack, w.keyHash, w.nonce))
-	hash := sha256.New
-	hkdf := hkdf.New(hash, S, nil, mess)
-	strong := make([]byte, aesKeyLen)
-	_, err = io.ReadFull(hkdf, strong)
-	if err != nil {
-		return
-	}
-
-	// Step 3. Decrypt dkey.
-	block, err := aes.NewCipher(strong)
-	if err != nil {
-		return
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return
-	}
-	dkey = make([]byte, 0, aesKeyLen)
-	dkey, err = aead.Open(dkey, w.nonce, w.dkey, nil)
-	if err != nil {
-		dkey = dkey[:0]
-	}
-	return
+	mess := fmt.Appendf(nil, "%02x:%x", upspin.EEPack, w.keyHash)
+	return f.DecapsulateKey(w.keyHash, mess, w.dkey)
 }
 
 // zeroSlice replaces the contents of the given slice with zeroes.

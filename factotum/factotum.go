@@ -254,7 +254,7 @@ func EncapsulateKey(pub upspin.PublicKey, info, dkey []byte) ([]byte, []byte, er
 	return KeyHash(pub), cipherDKey, nil
 }
 
-func (f factotum) DecapsulateKey(keyHash, ciphertext, info []byte) (dkey []byte, err error) {
+func (f factotum) DecapsulateKey(keyHash, info, ciphertext []byte) (dkey []byte, err error) {
 	const op errors.Op = "factotum.DecapsulateKey"
 
 	k, ok := f.keys[keyHashArray(keyHash)]

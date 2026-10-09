@@ -5,11 +5,9 @@
 package ee
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"crypto/mlkem"
 	"crypto/sha256"
 	"encoding/binary"
-	"math/big"
 
 	"upspin.io/errors"
 	"upspin.io/pack/packutil"
@@ -18,10 +16,8 @@ import (
 
 // wrappedKey encodes a key that will decrypt and verify the ciphertext.
 type wrappedKey struct {
-	keyHash   []byte // recipient's public key
-	dkey      []byte // ciphertext symmetric decryption key
-	nonce     []byte
-	ephemeral ecdsa.PublicKey
+	keyHash []byte // recipient's public key
+	dkey    []byte // ciphertext symmetric decryption key
 }
 
 // packdata is a structured representation of the DirEntry's Packdata field.
@@ -49,34 +45,16 @@ func (pd *packdata) Marshal(dst *[]byte) error {
 	n := 0
 
 	// sig
-	n += packutil.PutBytes((*dst)[n:], pd.sig.R.Bytes())
-	n += packutil.PutBytes((*dst)[n:], pd.sig.S.Bytes())
+	n += packutil.PutBytes((*dst)[n:], pd.sig)
 
 	// sig2
-	sig2 := pd.sig2
-	if sig2.R == nil {
-		zero := big.NewInt(0)
-		sig2 = upspin.Signature{R: zero, S: zero}
-	}
-	n += packutil.PutBytes((*dst)[n:], sig2.R.Bytes())
-	n += packutil.PutBytes((*dst)[n:], sig2.S.Bytes())
+	n += packutil.PutBytes((*dst)[n:], pd.sig2)
 
 	// wrap
 	n += binary.PutVarint((*dst)[n:], int64(len(pd.wrap)))
 	for _, w := range pd.wrap {
 		n += packutil.PutBytes((*dst)[n:], w.keyHash)
 		n += packutil.PutBytes((*dst)[n:], w.dkey)
-		n += packutil.PutBytes((*dst)[n:], w.nonce)
-		if w.ephemeral.X != nil {
-			n += packutil.PutBytes((*dst)[n:], w.ephemeral.X.Bytes())
-		} else {
-			n += packutil.PutBytes((*dst)[n:], nil)
-		}
-		if w.ephemeral.Y != nil {
-			n += packutil.PutBytes((*dst)[n:], w.ephemeral.Y.Bytes())
-		} else {
-			n += packutil.PutBytes((*dst)[n:], nil)
-		}
 	}
 
 	// blockSum
@@ -94,22 +72,14 @@ func (pd *packdata) Unmarshal(b []byte) error {
 	}
 	n := 0
 
-	// sig
-	pd.sig.R = big.NewInt(0)
-	pd.sig.S = big.NewInt(0)
 	buf := make([]byte, marshalBufLen)
+	// sig
 	n += packutil.GetBytes(&buf, b[n:])
-	pd.sig.R.SetBytes(buf)
-	n += packutil.GetBytes(&buf, b[n:])
-	pd.sig.S.SetBytes(buf)
+	pd.sig = append([]byte(nil), buf...)
 
 	// sig2
-	pd.sig2.R = big.NewInt(0)
-	pd.sig2.S = big.NewInt(0)
 	n += packutil.GetBytes(&buf, b[n:])
-	pd.sig2.R.SetBytes(buf)
-	n += packutil.GetBytes(&buf, b[n:])
-	pd.sig2.S.SetBytes(buf)
+	pd.sig2 = append([]byte(nil), buf...)
 
 	// wrap
 	nwrap64, vlen := binary.Varint(b[n:])
@@ -122,23 +92,9 @@ func (pd *packdata) Unmarshal(b []byte) error {
 	for i := 0; i < nwrap; i++ {
 		var w wrappedKey
 		w.keyHash = make([]byte, sha256.Size)
-		w.dkey = make([]byte, aesKeyLen+gcmTagSize)
-		w.nonce = make([]byte, gcmStandardNonceSize)
-		w.ephemeral = ecdsa.PublicKey{X: big.NewInt(0), Y: big.NewInt(0)}
 		n += packutil.GetBytes(&w.keyHash, b[n:])
-		n += packutil.GetBytes(&w.dkey, b[n:])
-		n += packutil.GetBytes(&w.nonce, b[n:])
 		n += packutil.GetBytes(&buf, b[n:])
-		w.ephemeral.X.SetBytes(buf)
-		n += packutil.GetBytes(&buf, b[n:])
-		w.ephemeral.Y.SetBytes(buf)
-		if w.ephemeral.Y.BitLen() > 393 {
-			w.ephemeral.Curve = elliptic.P521()
-		} else if w.ephemeral.Y.BitLen() > 265 {
-			w.ephemeral.Curve = elliptic.P384()
-		} else {
-			w.ephemeral.Curve = elliptic.P256()
-		}
+		w.dkey = append([]byte(nil), buf...)
 		pd.wrap[i] = w
 	}
 
@@ -158,27 +114,12 @@ func packdataLen(nwrap int) int {
 	intLen := binary.MaxVarintLen64
 
 	// nWrappedKey is the size of a single encoded wrappedKey
-	nWrappedKey := intLen + sha256.Size            // keyHash
-	nWrappedKey += intLen + aesKeyLen + gcmTagSize // dkey
-	nWrappedKey += intLen + gcmStandardNonceSize   // nonce
-	nWrappedKey += 2 * (intLen + marshalBufLen)    // ephemeral
+	nWrappedKey := intLen + sha256.Size                                      // keyHash
+	nWrappedKey += intLen + aesKeyLen + gcmTagSize + mlkem.CiphertextSize768 // dkey
 
-	n := 4 * (intLen + marshalBufLen) // (R,S) for (sig, sig2)
+	n := 2 * (intLen + marshalBufLen) // for (sig, sig2)
 	n += intLen                       // len(wrap)
 	n += nwrap * nWrappedKey
 	n += intLen + sha256.Size // blockSum
-
-	// n is commonly an overestimate since the big.Int used in p256 are
-	// about half the size of big.Int used in the assumed curve p521.
-	// At the time of writing:
-	//   marshalBufLen=66    curve.Params().BitSize + 7) >> 3 for p521
-	//   MaxVarintLen64=10
-	//   sha256.Size=32
-	//   aesKeyLen=32
-	//   gcmTagSize=16
-	//   gcmStandardNonceSize=12
-	// and therefore n = 356 + nwrap*274.
-	// On a 32-bit machine, this supports well over a million readers.
-	// We would redesign to use group keys long before that.
 	return n
 }

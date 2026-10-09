@@ -42,8 +42,7 @@ authentication request as a series of HTTP headers with key
        the user name,
        the server host name,
        the current time, and
-       the R part of an upspin.Signature,
-       the S part of an upspin.Signature.
+       the upspin.Signature base64 RawURL encoded.
 The current time is formatted using Go's time.ANSIC presentation:
 	"Mon Jan _2 15:04:05 2006"
 To generate the upspin.Signature, the client concatenates the user name, host

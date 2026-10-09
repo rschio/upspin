@@ -7,10 +7,10 @@ package rpc
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -380,7 +380,7 @@ func (s *serverImpl) handleSessionRequest(w http.ResponseWriter, authRequest []s
 // verifyUser authenticates the remote user.
 // msg is a slice of strings: user, host, time, sig.R, sig.S
 func verifyUser(key upspin.PublicKey, msg []string, magic, host string, now time.Time) error {
-	if len(msg) != 5 {
+	if len(msg) != 4 {
 		return errors.Str("bad header")
 	}
 
@@ -400,17 +400,15 @@ func verifyUser(key upspin.PublicKey, msg []string, magic, host string, now time
 	}
 
 	// Parse signature
-	var rs, ss big.Int
-	if _, ok := rs.SetString(msg[3], 10); !ok {
-		return errMissingSignature
+	signature, err := base64.RawURLEncoding.DecodeString(msg[3])
+	if err != nil {
+		return err
 	}
-	if _, ok := ss.SetString(msg[4], 10); !ok {
-		return errMissingSignature
-	}
+	sig := upspin.Signature(signature)
 
 	// Validate signature.
 	hash := hashUser(magic, msg[0], msg[1], msg[2])
-	err = factotum.Verify(hash, upspin.Signature{R: &rs, S: &ss}, key)
+	err = factotum.Verify(hash, sig, key)
 	if err != nil {
 		shortKey := string(key)
 		if len(shortKey) > 16 {
@@ -447,8 +445,7 @@ func signUser(cfg upspin.Config, magic, host string) ([]string, error) {
 		user,
 		host,
 		now,
-		sig.R.String(),
-		sig.S.String(),
+		base64.RawURLEncoding.EncodeToString(sig),
 	}, nil
 }
 

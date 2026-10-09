@@ -5,9 +5,7 @@
 package upspin // import "upspin.io/upspin"
 
 import (
-	"crypto/elliptic"
 	"errors"
-	"math/big"
 	"time"
 )
 
@@ -116,10 +114,8 @@ type ListRefsItem struct {
 	Size int64
 }
 
-// Signature is an ECDSA signature.
-type Signature struct {
-	R, S *big.Int
-}
+// Signature is an mldsa signature.
+type Signature []byte
 
 // DEHash is a hash of the Name, Link, Attribute, Packing, and Time
 // fields of a DirEntry. When using EE or EEIntegrity the hash also includes the
@@ -131,17 +127,15 @@ type Factotum interface {
 	// DirEntryHash is a summary used in signing and verifying directory entries.
 	DirEntryHash(n, l PathName, a Attribute, p Packing, t Time, dkey, hash []byte) DEHash
 
-	// FileSign ECDSA-signs DirEntry fields and, in some packings, file contents.
+	// FileSign mldsa-signs DirEntry fields and, in some packings, file contents.
 	FileSign(hash DEHash) (Signature, error)
 
-	// ScalarMult is the bare private key operator, used in unwrapping packed data.
-	// Each call needs security review to ensure it cannot be abused as a signing
-	// oracle. Read https://en.wikipedia.org/wiki/Confused_deputy_problem.
-	ScalarMult(keyHash []byte, c elliptic.Curve, x, y *big.Int) (sx, sy *big.Int, err error)
+	// DecapsulateKey is used to decapsulate the shared AES key.
+	DecapsulateKey(keyHash, ciphertext, info []byte) ([]byte, error)
 
 	// Sign signs a slice of bytes with the factotum's private key.
-	// The argument hash should be a cryptographic hash of the message you want to sign,
-	// no longer than your key's curve order. Don't use without a security consult.
+	// The argument hash should be a cryptographic hash of the message you want to sign.
+	// Don't use without a security consult.
 	Sign(hash []byte) (Signature, error)
 
 	// HKDF cryptographically mixes salt, info, and the Factotum secret and
@@ -774,7 +768,7 @@ type Client interface {
 	// not the link target.
 	SetTime(name PathName, t Time) error
 
-	// SetTimeSequenced sets the time in name's DirEntry. 
+	// SetTimeSequenced sets the time in name's DirEntry.
 	// SetTimeSequenced with SeqIgnore is the same as SetTime.
 	//
 	// A successful SetTimeSequenced returns an incomplete DirEntry (see the

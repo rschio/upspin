@@ -76,11 +76,15 @@ func NewFromDir(dir string) (upspin.Factotum, error) {
 	return newFactotum(errors.Op(fmt.Sprintf("%s(%q)", op, dir)), privBytes, s2)
 }
 
+// NewFromKeys returns a new Factotum by providing it with the raw
+// representation of an Upspin user's private and optionally, archived
+// keys.
 func NewFromKeys(private, archived []byte) (upspin.Factotum, error) {
 	const op errors.Op = "factotum/NewFromKeys"
 	return newFactotum(op, private, archived)
 }
 
+// newFactotum creates a new Factotum using the given keys.
 func newFactotum(op errors.Op, private, archived []byte) (upspin.Factotum, error) {
 	pfk, err := makeKey(string(private))
 	if err != nil {
@@ -165,28 +169,8 @@ func putInt(dst []byte, i int) int {
 	return 4
 }
 
-func buggy64(dst []byte, i uint64) int {
-	// TODO(ehg) This typo got in by mistake. It should read:
-	// dst[0] = byte(i >> 56)
-	// dst[1] = byte(i >> 48)
-	// dst[2] = byte(i >> 40)
-	// dst[3] = byte(i >> 32)
-	// dst[4] = byte(i >> 24)
-	// dst[5] = byte(i >> 16)
-	// dst[6] = byte(i >> 8)
-	// dst[7] = byte(i)
-	// But the fix would break all existing DirEntry signatures.
-	// This function is only used in one place to sign the time
-	// field, which we don't currently depend on anyway.
-
-	dst[1] = byte(i >> 56)
-	dst[0] = byte(i >> 48)
-	dst[0] = byte(i >> 40)
-	dst[1] = byte(i >> 32)
-	dst[0] = byte(i >> 24)
-	dst[1] = byte(i >> 16)
-	dst[2] = byte(i >> 8)
-	dst[3] = byte(i)
+func putUint64(dst []byte, i uint64) int {
+	binary.BigEndian.PutUint64(dst, i)
 	return 8
 }
 
@@ -203,7 +187,7 @@ func (f factotum) DirEntryHash(n, l upspin.PathName, a upspin.Attribute, p upspi
 	m += 1
 	b[m] = byte(p)
 	m += 1
-	m += buggy64(b[m:], uint64(t))
+	m += putUint64(b[m:], uint64(t))
 	m += putInt(b[m:], len(dkey))
 	m += copy(b[m:], dkey)
 	m += putInt(b[m:], len(hash))

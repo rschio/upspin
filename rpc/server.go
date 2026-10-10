@@ -7,7 +7,6 @@ package rpc
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -400,11 +399,10 @@ func verifyUser(key upspin.PublicKey, msg []string, magic, host string, now time
 	}
 
 	// Parse signature
-	signature, err := base64.RawURLEncoding.DecodeString(msg[3])
+	sig, err := upspin.ParseSignature(msg[3])
 	if err != nil {
 		return err
 	}
-	sig := upspin.Signature(signature)
 
 	// Validate signature.
 	hash := hashUser(magic, msg[0], msg[1], msg[2])
@@ -445,7 +443,7 @@ func signUser(cfg upspin.Config, magic, host string) ([]string, error) {
 		user,
 		host,
 		now,
-		base64.RawURLEncoding.EncodeToString(sig),
+		sig.String(),
 	}, nil
 }
 

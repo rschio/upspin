@@ -8,7 +8,6 @@ package server
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"net"
 	"strings"
@@ -307,12 +306,11 @@ func (s *server) verifyOwns(u upspin.UserName, pubKey upspin.PublicKey, domain s
 		}
 		txt = txt[len(prefix):]
 		// TODO(rschio): This will not work because TXT has a length limit.
-		signature, err := base64.RawURLEncoding.DecodeString(txt)
+		sig, err := upspin.ParseSignature(txt)
 		if err != nil {
 			lastErr = errors.E(errors.Invalid, "invalid signature")
 			continue
 		}
-		sig := upspin.Signature(signature)
 
 		hash := sha256.Sum256([]byte("upspin-domain:" + domain + "-" + string(u)))
 		err = factotum.Verify(hash[:], sig, pubKey)

@@ -7,7 +7,6 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -175,7 +174,7 @@ If any state exists at the given location (-where) then the command aborts.
 		UserName: s.Config.UserName(),
 		// TODO(rschio): This will not work because TXT has a lenght limit
 		// but put now just for test.
-		Signature: base64.RawURLEncoding.EncodeToString(sig),
+		Signature: sig.String(),
 
 		DirServerPath:   dirServerPath,
 		StoreServerPath: storeServerPath,
@@ -294,7 +293,7 @@ func (s *State) setuphost(where, domain string) {
 		UserName: s.Config.UserName(),
 		// TODO(rschio): This will not work because TXT has a lenght limit
 		// but put now just for test.
-		Signature: base64.RawURLEncoding.EncodeToString(sig),
+		Signature: sig.String(),
 	})
 	if err != nil {
 		s.Exit(err)

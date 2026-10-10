@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -138,12 +137,11 @@ func (m *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Validate the server signature and create the user.
 
 		// Parse signature.
-		signature, err := base64.RawURLEncoding.DecodeString(b64Sig)
+		sig, err := upspin.ParseSignature(b64Sig)
 		if err != nil {
 			errorf(http.StatusBadRequest, "invalid signature")
 			return
 		}
-		sig := upspin.Signature(signature)
 
 		// Parse time.
 		nowI, err := strconv.ParseInt(nowS, 10, 64)
@@ -228,7 +226,7 @@ func (m *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"dir":   {dir},
 		"store": {store},
 		"key":   {string(u.PublicKey)},
-		"sig":   {base64.RawURLEncoding.EncodeToString(sig)},
+		"sig":   {sig.String()},
 		"now":   {fmt.Sprint(now.Unix())},
 	}
 	signupURL := m.baseURL + "?" + vals.Encode()
@@ -255,11 +253,10 @@ func (m *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // dir, store and key were properly signed by the new user using the private key
 // that corresponds to the public key provided.
 func verifySignupSignature(user, dir, store, key, sig string) error {
-	signature, err := base64.RawURLEncoding.DecodeString(sig)
+	uSig, err := upspin.ParseSignature(sig)
 	if err != nil {
 		return err
 	}
-	uSig := upspin.Signature(signature)
 	hash, _ := RequestHash(upspin.UserName(user), upspin.NetAddr(dir), upspin.NetAddr(store), upspin.PublicKey(key))
 	return factotum.Verify(hash, uSig, upspin.PublicKey(key))
 }
@@ -410,7 +407,7 @@ func makeQueryString(cfg upspin.Config) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	vals.Add("sig", base64.RawURLEncoding.EncodeToString(sig))
+	vals.Add("sig", sig.String())
 	return vals.Encode(), nil
 }
 

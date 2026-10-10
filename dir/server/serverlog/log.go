@@ -184,7 +184,7 @@ func newRoot(rootFile string, fac upspin.Factotum, s storage.Storage) (*root, er
 
 func hashRoot(base string, fac upspin.Factotum) (string, error) {
 	salt := []byte("@@hashRoot!!")
-	suffix := make([]byte, 8)
+	suffix := make([]byte, 16)
 	err := fac.HKDF(salt, []byte(base), suffix)
 	if err != nil {
 		return "", err

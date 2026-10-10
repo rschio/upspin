@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -178,12 +179,14 @@ If any state exists at the given location (-where) then the command aborts.
 	}
 
 	err = setupDomainTemplate.Execute(s.Stdout, setupDomainData{
-		Dir:       baseDir,
-		Where:     where,
-		Domain:    *domain,
-		Project:   *project,
-		UserName:  s.Config.UserName(),
-		Signature: fmt.Sprintf("%x-%x", sig.R, sig.S),
+		Dir:      baseDir,
+		Where:    where,
+		Domain:   *domain,
+		Project:  *project,
+		UserName: s.Config.UserName(),
+		// TODO(rschio): This will not work because TXT has a lenght limit
+		// but put now just for test.
+		Signature: base64.RawURLEncoding.EncodeToString(sig),
 
 		DirCurve:        dirCurve,
 		StoreCurve:      storeCurve,
@@ -300,11 +303,13 @@ func (s *State) setuphost(where, domain, curve, proquint string) {
 	})
 
 	err = setupHostTemplate.Execute(s.Stdout, setupDomainData{
-		Dir:       cfgPath,
-		Where:     where,
-		Domain:    domain,
-		UserName:  s.Config.UserName(),
-		Signature: fmt.Sprintf("%x-%x", sig.R, sig.S),
+		Dir:      cfgPath,
+		Where:    where,
+		Domain:   domain,
+		UserName: s.Config.UserName(),
+		// TODO(rschio): This will not work because TXT has a lenght limit
+		// but put now just for test.
+		Signature: base64.RawURLEncoding.EncodeToString(sig),
 
 		Curve:    curve,
 		Proquint: proquint,

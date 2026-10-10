@@ -8,8 +8,8 @@ package server
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
-	"math/big"
 	"net"
 	"strings"
 	"sync"
@@ -306,27 +306,16 @@ func (s *server) verifyOwns(u upspin.UserName, pubKey upspin.PublicKey, domain s
 			continue
 		}
 		txt = txt[len(prefix):]
-		// Is there a signature with two segments after the prefix?
-		sigFields := strings.Split(txt, "-")
-		if len(sigFields) != 2 {
+		// TODO(rschio): This will not work because TXT has a length limit.
+		signature, err := base64.RawURLEncoding.DecodeString(txt)
+		if err != nil {
+			lastErr = errors.E(errors.Invalid, "invalid signature")
 			continue
 		}
-		// Parse signature.
-		var sig upspin.Signature
-		var rs, ss big.Int
-		if _, ok := rs.SetString(sigFields[0], 16); !ok {
-			lastErr = errors.E(errors.Invalid, "invalid signature field0")
-			continue
-		}
-		if _, ok := ss.SetString(sigFields[1], 16); !ok {
-			lastErr = errors.E(errors.Invalid, "invalid signature field1")
-			continue
-		}
-		sig.R = &rs
-		sig.S = &ss
+		sig := upspin.Signature(signature)
 
 		hash := sha256.Sum256([]byte("upspin-domain:" + domain + "-" + string(u)))
-		err := factotum.Verify(hash[:], sig, pubKey)
+		err = factotum.Verify(hash[:], sig, pubKey)
 		if err == nil {
 			// Success!
 			return nil

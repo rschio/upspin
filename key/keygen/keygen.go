@@ -7,74 +7,28 @@
 package keygen // import "upspin.io/key/keygen"
 
 import (
-	"encoding/binary"
+	"crypto/mldsa"
+	"crypto/mlkem"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"upspin.io/errors"
-	"upspin.io/key/proquint"
-	"upspin.io/pack/ee"
+	"upspin.io/factotum"
 )
 
-// secret represents the secret seed for a key.
-// It is the byte representation of a proquint string.
-//
-// TODO(ehg): Consider whether to use long seeds for P521.
-type secret [16]byte
-
-func (b secret) proquint() string {
-	proquints := make([]interface{}, len(b)/2)
-	for i := range proquints {
-		proquints[i] = proquint.Encode(binary.BigEndian.Uint16(b[2*i : 2*i+2]))
-	}
-	return fmt.Sprintf("%s-%s-%s-%s.%s-%s-%s-%s", proquints...)
-}
-
-func secretFromProquint(secretStr string) secret {
-	var b secret
-	pq := []byte(secretStr)
-	for i := 0; i < len(b)/2; i++ {
-		binary.BigEndian.PutUint16(b[2*i:2*i+2], proquint.Decode(pq[6*i:6*i+5]))
-	}
-	return b
-}
-
-// Generate generates a random key pair on the given curve.
-func Generate(curveName string) (public, private, secretStr string, err error) {
-	// Pick secret 128 bits.
-	var b secret
-	ee.GenEntropy(b[:])
-	return FromSecret(curveName, b.proquint())
-}
-
-// FromSecret generates a key pair with the given curve and secret seed.
-func FromSecret(curveName, secret string) (public, private, secretStr string, err error) {
-	const op errors.Op = "keygen.FromSecret"
-	secretStr = secret
-	if !ValidSecretSeed(secretStr) {
-		err := errors.Errorf("expected secret like\n"+
-			"\tlusab-babad-gutih-tugad.gutuk-bisog-mudof-sakat\n"+
-			"got\n\t%q", secretStr)
-		return "", "", "", errors.E(op, errors.Invalid, err)
-	}
-	b := secretFromProquint(secretStr)
-	pub, priv, err := ee.CreateKeys(curveName, b[:])
+func Generate() (public, private string, err error) {
+	k, err := mldsa.GenerateKey(mldsa.MLDSA44())
 	if err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
-	return string(pub), priv, secretStr, nil
-}
-
-// ValidSecretSeed reports whether a seed conforms to the proquint format.
-func ValidSecretSeed(seed string) bool {
-	if len(seed) != 47 {
-		return false
+	dk, err := mlkem.GenerateKey768()
+	if err != nil {
+		return "", "", err
 	}
-
-	// Check if the seed can be converted to a secret and back to the same seed.
-	return seed == secretFromProquint(seed).proquint()
+	public = string(factotum.EncodePublicKeys(k.PublicKey(), dk.EncapsulationKey()))
+	private = string(factotum.EncodeSecretKeys(k, dk))
+	return public, private, nil
 }
 
 // writeKeyFile writes a single key to its file, removing the file
@@ -106,12 +60,8 @@ func writeKeyFile(name, key string) error {
 }
 
 // writeKeys saves both the public and private keys to their respective files.
-// If secretStr is non-empty it is appended as a comment to the private key.
 // writeKeys will overwrite any existing keys.
-func writeKeys(where, publicKey, privateKey, secretStr string) error {
-	if secretStr != "" {
-		privateKey = strings.TrimSpace(privateKey) + " # " + secretStr + "\n"
-	}
+func writeKeys(where, publicKey, privateKey string) error {
 	err := writeKeyFile(filepath.Join(where, "secret.upspinkey"), privateKey)
 	if err != nil {
 		return err
@@ -121,10 +71,9 @@ func writeKeys(where, publicKey, privateKey, secretStr string) error {
 
 // SaveKeys writes the provided public and private keys to the given directory,
 // rotating them if requested by appending the old secret to secret2.upspinkey.
-// If secretStr is non-empty it is appended as a comment to the private key.
 // If rotate is false and there are existing keys, SaveKeys returns an error.
 // If rotate is true and there are no existing keys, SaveKeys returns an error.
-func SaveKeys(where string, rotate bool, newPublic, newPrivate, secretStr string) error {
+func SaveKeys(where string, rotate bool, newPublic, newPrivate string) error {
 	var (
 		publicFile  = filepath.Join(where, "public.upspinkey")
 		privateFile = filepath.Join(where, "secret.upspinkey")
@@ -139,7 +88,7 @@ func SaveKeys(where string, rotate bool, newPublic, newPrivate, secretStr string
 			return errors.Errorf("cannot rotate keys: no prior keys exist in %s", where)
 		}
 		// We didn't expect key rotation, so just write the new keys.
-		return writeKeys(where, newPublic, newPrivate, secretStr)
+		return writeKeys(where, newPublic, newPrivate)
 	}
 	if err != nil {
 		return err
@@ -181,5 +130,5 @@ func SaveKeys(where string, rotate bool, newPublic, newPrivate, secretStr string
 	}
 
 	// Write the new keys.
-	return writeKeys(where, newPublic, newPrivate, secretStr)
+	return writeKeys(where, newPublic, newPrivate)
 }

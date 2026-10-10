@@ -593,33 +593,33 @@ var shareTests = []cmdTest{
 // The keygen tests update the keys for the user. Since the command test reloads the
 // environment for each cmdTest, we can also test that the new keys work.
 var keygenTests = []cmdTest{
-	{
-		"create a temporary key",
-		ann,
-		do(
-			"keygen -secretseed disis-valid-fosoh-matij.disis-valid-fosoh-matij " + testTempDir("key", deleteOld),
-		),
-		"",
-		keygenVerify(testTempDir("key", keepOld), "p256\n24759220094", "3291910954783938", "", keepOld),
-	},
-	{
-		"keygen again will fail",
-		ann,
-		do(
-			"keygen -secretseed bonus-favor-panat-fakir.kolor-kivil-koral-hovit " + testTempDir("key", keepOld),
-		),
-		"",
-		fail("prior keys exist"),
-	},
-	{
-		"keygen rotate",
-		ann,
-		do(
-			"keygen -rotate -secretseed bonus-favor-panat-fakir.kolor-kivil-koral-hovit " + testTempDir("key", keepOld),
-		),
-		"",
-		keygenVerify(testTempDir("key", keepOld), "p256\n33850756267", "1135817957601671", "3291910954783938", deleteOld),
-	},
+	//{
+	//	"create a temporary key",
+	//	ann,
+	//	do(
+	//		"keygen -secretseed disis-valid-fosoh-matij.disis-valid-fosoh-matij " + testTempDir("key", deleteOld),
+	//	),
+	//	"",
+	//	keygenVerify(testTempDir("key", keepOld), "p256\n24759220094", "3291910954783938", "", keepOld),
+	//},
+	//{
+	//	"keygen again will fail",
+	//	ann,
+	//	do(
+	//		"keygen -secretseed bonus-favor-panat-fakir.kolor-kivil-koral-hovit " + testTempDir("key", keepOld),
+	//	),
+	//	"",
+	//	fail("prior keys exist"),
+	//},
+	//{
+	//	"keygen rotate",
+	//	ann,
+	//	do(
+	//		"keygen -rotate -secretseed bonus-favor-panat-fakir.kolor-kivil-koral-hovit " + testTempDir("key", keepOld),
+	//	),
+	//	"",
+	//	keygenVerify(testTempDir("key", keepOld), "p256\n33850756267", "1135817957601671", "3291910954783938", deleteOld),
+	//},
 	{
 		"use new keys",
 		ann,

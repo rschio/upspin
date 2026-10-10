@@ -14,46 +14,11 @@ import (
 	"upspin.io/key/keygen"
 )
 
-// Round 1.
-const (
-	secretStr = "pibud-sijat-ponam-zizaz.kudol-visin-vakok-jinok"
-	publicKey = `p256
-20475414006091125411730282854763965332579614918776190347990649355528840360162
-41618798560597642013440926161855187887081385971895806061707694318148863738083
-`
-
-	privateKey = "103735382135370212717736500933863354513183407328603457343387144070761075604179\n"
-)
-
-// Round 2.
-const (
-	secretStr2 = "ponam-sijat-pibud-zizaz.vakok-visin-kudol-jinok"
-
-	public2Key = `p256
-12123951731103713463684549996372980607529899544492565862335281576402253981962
-115773437512973772745017348056058736133905153504498008582636958858837556112862
-`
-
-	private2Key = "47513031334211958720530809945101319621000940818220052385943490959145831252616\n"
-
-	archive2Key = `p256
-20475414006091125411730282854763965332579614918776190347990649355528840360162
-41618798560597642013440926161855187887081385971895806061707694318148863738083
-103735382135370212717736500933863354513183407328603457343387144070761075604179 # pibud-sijat-ponam-zizaz.kudol-visin-vakok-jinok
-`
-)
-
 func TestSaveKeygen(t *testing.T) {
 	s := newState("test")
-	public, private, proquint, err := s.createKeys("p256", secretStr)
+	public0, private0, err := s.createKeys()
 	if err != nil {
 		t.Fatalf("creating keys: %v", err)
-	}
-	if public != publicKey {
-		t.Errorf("round 1: got public key %q; want %q", public, publicKey)
-	}
-	if private != privateKey {
-		t.Errorf("round 1: got private key %q; want %q", private, privateKey)
 	}
 
 	// Write them to a file.
@@ -62,7 +27,7 @@ func TestSaveKeygen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-	err = keygen.SaveKeys(dir, false, public, private, proquint)
+	err = keygen.SaveKeys(dir, false, public0, private0)
 	if err != nil {
 		t.Fatalf("writing keys: %v", err)
 	}
@@ -72,32 +37,26 @@ func TestSaveKeygen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != public {
-		t.Fatalf("reading public key: got %q; want %q", data, public)
+	if string(data) != public0 {
+		t.Fatalf("reading public key: got %q; want %q", data, public0)
 	}
 	data, err = os.ReadFile(filepath.Join(dir, "secret.upspinkey"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := strings.TrimSpace(private) + " # " + proquint + "\n"
+	want := strings.TrimSpace(private0) + "\n"
 	if got := string(data); got != want {
 		t.Fatalf("reading secret key: got %q; want %q", got, want)
 	}
 
 	// Generate again.
-	public, private, proquint, err = s.createKeys("p256", secretStr2)
+	public, private, err := s.createKeys()
 	if err != nil {
 		t.Fatalf("creating keys: %v", err)
 	}
-	if public != public2Key {
-		t.Errorf("round 2: got public key %q; want %q", public, publicKey)
-	}
-	if private != private2Key {
-		t.Errorf("round 2: got private key %q; want %q", private, private2Key)
-	}
 
 	// Update and rotate keys.
-	err = keygen.SaveKeys(dir, true, public, private, proquint)
+	err = keygen.SaveKeys(dir, true, public, private)
 	if err != nil {
 		t.Fatalf("saving keys: %v", err)
 	}
@@ -114,7 +73,7 @@ func TestSaveKeygen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = strings.TrimSpace(private) + " # " + proquint + "\n"
+	want = strings.TrimSpace(private) + "\n"
 	if got := string(data); got != want {
 		t.Fatalf("reading secret key: got %q; want %q", got, want)
 	}
@@ -128,7 +87,7 @@ func TestSaveKeygen(t *testing.T) {
 	if i >= 0 {
 		data = data[i+1:] // Strip "# EE modtime".
 	}
-	if string(data) != archive2Key {
-		t.Fatalf("reading archive key: got\n%s\n\twant\n%s", data, archive2Key)
+	if string(data) != public0+private0 {
+		t.Fatalf("reading archive key: got\n%s\n\twant\n%s", data, public0+private0)
 	}
 }

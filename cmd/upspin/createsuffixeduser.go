@@ -38,10 +38,8 @@ rather than this command.
 		dirServer   = fs.String("dir", string(s.Config.DirEndpoint().NetAddr), "Directory server `address`")
 		storeServer = fs.String("store", string(s.Config.StoreEndpoint().NetAddr), "Store server `address`")
 		bothServer  = fs.String("server", "", "Store and Directory server `address` (if combined)")
-		curve       = fs.String("curve", "p256", "cryptographic curve `name`: p256, p384, or p521")
 		rotate      = fs.Bool("rotate", false, "back up the existing keys and replace them with new ones")
 		secrets     = fs.String("secrets", "", "`directory` to store key pair")
-		secretseed  = fs.String("secretseed", "", "the seed containing a 128 bit secret in proquint format or a file that contains it")
 	)
 	s.ParseFlags(fs, args, help, "createsuffixeduser <suffixed-user-name>")
 
@@ -133,19 +131,12 @@ rather than this command.
 			s.Exit(err)
 		}
 	}
-	var pubk, privk, proquint string
-	if *secretseed == "" {
-		// Generate new keys.
-		pubk, privk, proquint, err = keygen.Generate(*curve)
-	} else {
-		// Generate from the proquint.
-		pubk, privk, proquint, err = keygen.FromSecret(*curve, *secretseed)
-	}
+	pubk, privk, err := keygen.Generate()
 	if err != nil {
 		os.Remove(configFN)
 		s.Exit(err)
 	}
-	err = keygen.SaveKeys(*secrets, *rotate, pubk, privk, proquint)
+	err = keygen.SaveKeys(*secrets, *rotate, pubk, privk)
 	if err != nil {
 		os.Remove(configFN)
 		s.Exit(err)
@@ -170,11 +161,5 @@ rather than this command.
 	fmt.Fprintf(s.Stderr, "\t%s\n", filepath.Join(where, "public.upspinkey"))
 	fmt.Fprintf(s.Stderr, "\t%s\n", filepath.Join(where, "secret.upspinkey"))
 	fmt.Fprintln(s.Stderr, "This key pair provides access to your Upspin identity and data.")
-	if *secretseed == "" {
-		fmt.Fprintln(s.Stderr, "If you lose the keys you can re-create them by running this command:")
-		fmt.Fprintf(s.Stderr, "\tupspin keygen -curve %s -secretseed %s %s\n", *curve, proquint, where)
-		fmt.Fprintln(s.Stderr, "Write this command down and store it in a secure, private place.")
-		fmt.Fprintln(s.Stderr, "Do not share your private key or this command with anyone.")
-	}
 	fmt.Fprintln(s.Stderr)
 }

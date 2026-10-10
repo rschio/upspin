@@ -9,13 +9,9 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 
-	"upspin.io/errors"
 	"upspin.io/key/keygen"
-	"upspin.io/subcmd"
 )
 
 func (s *State) keygen(args ...string) {
@@ -34,31 +30,22 @@ See the description for rotate for information about updating keys.
 	// there as well.
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
 	var (
-		curve      = fs.String("curve", "p256", "cryptographic curve `name`: p256, p384, or p521")
-		secretSeed = fs.String("secretseed", "", "the seed containing a 128-bit secret in proquint format or a file that contains it")
-		rotate     = fs.Bool("rotate", false, "back up the existing keys and replace them with new ones")
+		rotate = fs.Bool("rotate", false, "back up the existing keys and replace them with new ones")
 	)
 	s.ParseFlags(fs, args, help, "keygen [-curve=256] [-secretseed=seed] <directory>")
 	if fs.NArg() != 1 {
 		usageAndExit(fs)
 	}
-	s.keygenCommand(fs.Arg(0), *curve, *secretSeed, *rotate)
+	s.keygenCommand(fs.Arg(0), *rotate)
 }
 
-func (s *State) keygenCommand(where, curve, secretseed string, rotate bool) {
-	switch curve {
-	case "p256", "p384", "p521":
-		// ok
-	default:
-		s.Exitf("no such curve %q", curve)
-	}
-
-	public, private, secretStr, err := s.createKeys(curve, secretseed)
+func (s *State) keygenCommand(where string, rotate bool) {
+	public, private, err := s.createKeys()
 	if err != nil {
 		s.Exitf("creating keys: %v", err)
 	}
 
-	err = keygen.SaveKeys(where, rotate, public, private, secretStr)
+	err = keygen.SaveKeys(where, rotate, public, private)
 	if err != nil {
 		s.Exitf("keys not generated: %s", err)
 	}
@@ -71,32 +58,12 @@ func (s *State) keygenCommand(where, curve, secretseed string, rotate bool) {
 	fmt.Fprintf(s.Stderr, "\t%s\n", filepath.Join(where, "public.upspinkey"))
 	fmt.Fprintf(s.Stderr, "\t%s\n", filepath.Join(where, "secret.upspinkey"))
 	fmt.Fprintln(s.Stderr, "This key pair provides access to your Upspin identity and data.")
-	if secretseed == "" {
-		fmt.Fprintln(s.Stderr, "If you lose the keys you can re-create them by running this command:")
-		fmt.Fprintf(s.Stderr, "\tupspin keygen -curve %s -secretseed %s %s\n", curve, secretStr, where)
-		fmt.Fprintln(s.Stderr, "Write this command down and store it in a secure, private place.")
-		fmt.Fprintln(s.Stderr, "Do not share your private key or this command with anyone.")
-	}
 	if rotate {
 		fmt.Fprintln(s.Stderr, "\nTo install new keys in the key server, see 'upspin rotate -help'.")
 	}
 	fmt.Fprintln(s.Stderr)
 }
 
-func (s *State) createKeys(curveName, secretFlag string) (public, private, secretStr string, err error) {
-	// There are three cases:
-	// 1) No secretFlag was given. Create a new secret seed.
-	// 2) A secretFlag looks valid. Accept it.
-	// 3) The secretFlag must be a file. Try to read it.
-	if secretFlag == "" {
-		return keygen.Generate(curveName)
-	}
-	if !keygen.ValidSecretSeed(secretFlag) {
-		data, err := os.ReadFile(subcmd.Tilde(secretFlag))
-		if err != nil {
-			return "", "", "", errors.E(errors.Op("keygen"), errors.IO, err)
-		}
-		secretFlag = strings.TrimSpace(string(data))
-	}
-	return keygen.FromSecret(curveName, secretFlag)
+func (s *State) createKeys() (public, private string, err error) {
+	return keygen.Generate()
 }
